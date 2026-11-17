@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Exemple · Facturer depuis une page web</title>
+    <style>
+      :root {
+        --ink: #14161a;
+        --muted: #5d6470;
+        --line: #e3e5e9;
+        --accent: #2f62f6;
+        --ok: #127a46;
+        --warn: #a14b00;
+        --paper: #ffffff;
+        --field: #f6f7f9;
+        color-scheme: light;
+        font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      }
+      body { margin: 0; background: var(--paper); color: var(--ink); }
+      main { max-width: 560px; margin: 40px auto; padding: 0 16px; display: flex; flex-direction: column; gap: 20px; }
+      h1 { font-size: 22px; margin: 0; }
+      p { margin: 0; color: var(--muted); line-height: 1.5; }
+      section { border: 1px solid var(--line); border-radius: 10px; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+      h2 { font-size: 15px; margin: 0; }
+      label { font-size: 13px; color: var(--muted); }
+      input { font: inherit; font-family: ui-monospace, monospace; text-transform: uppercase; letter-spacing: 0.08em; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--field); }
+      button { font: inherit; font-weight: 600; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: var(--paper); cursor: pointer; align-self: flex-start; }
+      button.secondary { background: var(--paper); color: var(--ink); border-color: var(--line); font-weight: 500; }
+      button:disabled { opacity: 0.55; cursor: not-allowed; }
+      .row { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+      .field { display: flex; flex-direction: column; gap: 4px; }
+      .status { font-size: 14px; }
+      .ok { color: var(--ok); }
+      .warn { color: var(--warn); }
+      dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
+      dt { color: var(--muted); }
+      dd { margin: 0; font-weight: 600; }
+      .row[hidden], dl[hidden], button[hidden] { display: none; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Facturer depuis une page web</h1>
+        <p>Une page d'exemple : elle demande les lectures et la signature à Ophelix, qui les confie à l'agent de ce poste, et son serveur crée la facture. Aucune extension, aucun port ouvert sur le poste.</p>
+      </header>
+
+      <section aria-labelledby="poste-titre">
+        <h2 id="poste-titre">Poste</h2>
+        <p class="status" id="poste" role="status">Connexion à Ophelix…</p>
+        <form class="row" id="associer" hidden>
+          <div class="field">
+            <label for="code">Code affiché par l'agent</label>
+            <input id="code" name="code" autocomplete="off" maxlength="8" placeholder="K7P-4QX" required />
+          </div>
+          <button type="submit">Associer ce poste</button>
+        </form>
+        <button class="secondary" type="button" id="oublier" hidden>Oublier ce poste</button>
+      </section>
+
+      <section aria-labelledby="praticien-titre">
+        <h2 id="praticien-titre">Praticien</h2>
+        <p class="status" id="praticien" role="status">Recherche du praticien…</p>
+        <button type="button" class="secondary" id="lire-cps" disabled>Lire la CPS</button>
+      </section>
+
+      <section aria-labelledby="carte-titre">
+        <h2 id="carte-titre">Carte Vitale</h2>
+        <button type="button" id="lire" disabled>Lire la carte Vitale</button>
+        <p class="status" id="lecture" role="status"></p>
+        <dl id="patient" hidden aria-label="Patient lu">
+          <dt>Patient</dt><dd id="nom"></dd>
+          <dt>Né le</dt><dd id="naissance"></dd>
+          <dt>Droits</dt><dd id="droits"></dd>
+          <dt>Caisse</dt><dd id="caisse"></dd>
+        </dl>
+      </section>
+
+      <section aria-labelledby="facture-titre">
+        <h2 id="facture-titre">Facture</h2>
+        <p class="status" id="facturation" role="status">Lisez la carte Vitale du patient pour le facturer.</p>
+        <button type="button" id="facturer" disabled>Créer la facture</button>
+        <dl id="facture" hidden aria-label="Facture créée">
+          <dt>Facture</dt><dd id="facture-id"></dd>
+          <dt>Acte</dt><dd id="acte"></dd>
+          <dt>Montant</dt><dd id="montant"></dd>
+          <dt>État</dt><dd id="etat"></dd>
+        </dl>
+        <button type="button" id="signer" hidden>Signer avec la CPS du poste</button>
+      </section>
+    </main>
+
+    <script type="module">
+      import { OphelixBrowser } from '/ophelix-browser.js'
+
+      const $ = id => document.getElementById(id)
+
+      /** Un appel au serveur de l'intégrateur. Il garde la clé et relit tout ce que la page lui nomme. */
+      async function server(method, path, body) {
+        const response = await fetch(path, {
+          method,
+          headers: body ? { 'Content-Type': 'application/json' } : {},
+          body: body ? JSON.stringify(body) : undefined,
+        })
+        const payload = await response.json()
+        if (!response.ok) throw Object.assign(new Error(payload.error.message), { code: payload.error.code })
+        return payload
+      }
+
+      const reader = OphelixBrowser.create({
+        apiUrl: '%OPHELIX_API_URL%',
+        // Le serveur de l'intégrateur ouvre la session avec sa clé secrète : la page n'en voit aucune.
+        fetchClientSecret: async () => (await server('POST', '/session')).client_secret,
+      })
+
+      const CARDS = { vitale: 'carte Vitale', cps: 'CPS', unknown: 'carte inconnue' }
+      const STATUSES = { draft: 'brouillon', ready: 'prête à signer', secured: 'sécurisée' }
+      const MESSAGES = {
+        card_absent: 'Insérez la carte dans le lecteur du poste, puis recommencez.',
+        workstation_offline: "L'agent du poste ne répond pas. Vérifiez qu'il tourne.",
+        workstation_not_linked: "Associez d'abord ce navigateur au poste.",
+        origin_not_allowed: "Cette page n'est pas autorisée à piloter les postes de l'organisation.",
+        browser_link_code_invalid: "Ce code ne mène à aucun poste. Affichez-en un nouveau dans l'agent.",
+        expired: "L'agent n'a pas pris la demande à temps.",
+        declined: 'La demande a été refusée sur le poste.',
+        practitioner_missing: "Lisez d'abord la CPS du praticien.",
+      }
+      const say = error => MESSAGES[error.code] ?? error.message
+      const euros = cents => (cents === null ? '—' : (cents / 100).toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' }))
+
+      /** Le praticien que le serveur retient, la lecture Vitale à facturer, la facture créée. */
+      let practitioner = null
+      let reading = null
+      let claim = null
+
+      function report(id, text, tone) {
+        $(id).textContent = text
+        $(id).className = tone ? `status ${tone}` : 'status'
+      }
+
+      /** Ce qui se clique dépend du poste, du praticien et de la carte lue. */
+      function sync() {
+        const linked = !!reader.session?.workstation
+        $('lire-cps').disabled = !linked
+        $('lire').disabled = !linked
+        $('facturer').disabled = !linked || !practitioner || !reading || !!claim
+        $('signer').hidden = claim?.status !== 'ready'
+      }
+
+      function show(session) {
+        const workstation = session.workstation
+        $('associer').hidden = !!workstation
+        $('oublier').hidden = !workstation
+        sync()
+        if (!workstation) {
+          $('poste').textContent = "Ce navigateur n'est associé à aucun poste. Dans l'agent, ouvrez Paramètres puis « Associer une page web », et recopiez le code."
+          return
+        }
+        const cards = workstation.cards.map(kind => CARDS[kind]).join(', ')
+        $('poste').textContent = `${workstation.name} · ${workstation.online ? 'en ligne' : 'hors ligne'}${cards ? ` · ${cards} insérée` : ''}`
+      }
+
+      function showPractitioner(found) {
+        practitioner = found
+        report('praticien', found ? `${found.first_name} ${found.last_name} facture depuis cette page.` : 'Aucun praticien : lisez la CPS insérée dans le lecteur du poste.')
+        $('lire-cps').textContent = found ? 'Lire une autre CPS' : 'Lire la CPS'
+        sync()
+      }
+
+      function showClaim(found) {
+        claim = found
+        $('facture-id').textContent = found.id
+        $('acte').textContent = found.act
+        $('montant').textContent = euros(found.amount_cents)
+        $('etat').textContent = STATUSES[found.status] ?? found.status
+        $('facture').hidden = false
+        sync()
+        $('facture').scrollIntoView({ block: 'nearest' })
+      }
+
+      /** Le bouton reste désactivé le temps que la demande aboutisse. */
+      async function busy(button, work) {
+        $(button).disabled = true
+        try {
+          await work()
+        } finally {
+          sync()
+        }
+      }
+
+      $('associer').addEventListener('submit', async event => {
+        event.preventDefault()
+        try {
+          show(await reader.link($('code').value))
+          $('code').value = ''
+        } catch (error) {
+          $('poste').textContent = say(error)
+        }
+      })
+
+      $('oublier').addEventListener('click', async () => {
+        reader.forget()
+        show(await reader.connect())
+      })
+
+      $('lire-cps').addEventListener('click', () =>
+        busy('lire-cps', async () => {
+          try {
+            report('praticien', 'Lecture de la CPS…')
+            const action = await reader.readCps()
+            // La demande ne nomme que le praticien : le serveur la relit avec sa clé, puis le retient.
+            showPractitioner((await server('POST', '/practitioner', { action: action.id })).practitioner)
+          } catch (error) {
+            report('praticien', say(error), 'warn')
+          }
+        }),
+      )
+
+      $('lire').addEventListener('click', () =>
+        busy('lire', async () => {
+          $('patient').hidden = true
+          $('facture').hidden = true
+          reading = null
+          claim = null
+          report('facturation', 'Lisez la carte Vitale du patient pour le facturer.')
+          try {
+            const action = await reader.readVitale({
+              onStatus: status => report('lecture', status === 'pending' ? 'Demande envoyée au poste…' : 'Lecture de la carte…'),
+            })
+            // La demande ne rend que des identifiants : le serveur la relit, puis lit les droits avec sa clé.
+            const coverage = await server('POST', '/patient', { action: action.id })
+            $('nom').textContent = `${coverage.first_name} ${coverage.last_name}`
+            $('naissance').textContent = new Date(coverage.birth_date).toLocaleDateString('fr-FR', { timeZone: 'UTC' })
+            $('droits').textContent = coverage.rights === 'open' ? 'ouverts' : 'fermés'
+            $('caisse').textContent = coverage.fund_code ?? '—'
+            $('patient').hidden = false
+            reading = action.id
+            report('lecture', 'Carte lue.', 'ok')
+            report('facturation', practitioner ? 'Prête à facturer une consultation.' : "Lisez d'abord la CPS du praticien.")
+          } catch (error) {
+            report('lecture', say(error), 'warn')
+          }
+        }),
+      )
+
+      $('facturer').addEventListener('click', () =>
+        busy('facturer', async () => {
+          try {
+            report('facturation', 'Création de la facture…')
+            // Le serveur crée la facture avec sa clé, pour le patient de la lecture qu'on lui nomme.
+            showClaim(await server('POST', '/claims', { action: reading }))
+            report('facturation', 'Facture créée et validée. Signez-la avec la CPS du poste.', 'ok')
+          } catch (error) {
+            report('facturation', say(error), 'warn')
+          }
+        }),
+      )
+
+      $('signer').addEventListener('click', () =>
+        busy('signer', async () => {
+          try {
+            await reader.secureClaim(claim.id, {
+              onStatus: status =>
+                report(
+                  'facturation',
+                  status === 'pending' ? 'Demande de signature envoyée au poste…' : "Signature en cours : le code porteur se saisit dans la fenêtre de l'agent.",
+                ),
+            })
+            // Le poste a signé : le serveur relit l'état de sa facture avec sa clé.
+            showClaim({ ...claim, ...(await server('GET', `/claims/${claim.id}`)) })
+            report('facturation', 'Facture sécurisée.', 'ok')
+          } catch (error) {
+            report('facturation', say(error), 'warn')
+          }
+        }),
+      )
+
+      reader
+        .connect()
+        .then(show)
+        .catch(error => {
+          $('poste').textContent = say(error)
+        })
+      server('GET', '/practitioner')
+        .then(found => showPractitioner(found.practitioner))
+        .catch(error => report('praticien', say(error), 'warn'))
+    </script>
+  </body>
+</html>
